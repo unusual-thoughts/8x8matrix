@@ -2,8 +2,8 @@ Backpack for 8x8 RGB LED matrix
 ==============================
 
 This is a simple breakout board for 8x8 RGB matrices like the [GTM2088ARGB](http://www.ebay.com/itm/5mm-8x8-Matrix-RGB-LED-Common-Anode-Full-Colour-60-60mm-/370699782315)  
-It uses TLC5947 that provides 24 12 bit current sink PWM channels, and a 74HC138 3 to 8 line decoder followed by P-channel MOSFETs to drive the rows.
-The parts are in the ../mylibs/mylib.lbr library.  
+It uses a [TLC5947](http://www.ti.com/product/tlc5947) that provides 24 12 bit current sink PWM channels, and a 74HC138 3 to 8 line decoder followed by P-channel MOSFETs to drive the rows.  
+The needed Eagle libraries are in `eagle-lbr/`  
 The whole thing fits on a single layer PCB.  
 The matrix is controlled through the 9-pin header with this pinout:
 
@@ -38,6 +38,8 @@ TLC channel	| Columns
 8-15		| Blue 0-7
 16-23		| Green 7-0 (inverted order)
 
-There is a modified version of the Tlc5940 library by Alex Leone, named Tlc5947 in my arduino folder. Like its counterpart, it can use arduino hardware spi to speed things up to an acceptable refresh rate. The basic bitbang code flickers quite a bit, even with direct port manipulation.  
+The `arduino-lbr/` directory contatins a modified version of the Tlc5940 library by Alex Leone, named Tlc5947. Like its counterpart, it can use arduino hardware spi to speed things up to an acceptable refresh rate. The basic bitbang code flickers quite a bit, even with direct port manipulation.
+
+The `arduino/` directory contains a demo arduino sketch using that library.
 
 ![layers](prints/layers.gif)
