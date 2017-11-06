@@ -28,58 +28,43 @@
 /** Pulses a pin - high then low. */
 #define pulse_pin(port, pin)   port |= _BV(pin); port &= ~_BV(pin)
 
-/** This will be true (!= 0) if update was just called and the data has not
-    been latched in yet. */
-volatile uint8_t tlc_needXLAT;
-
 /** Some of the extened library will need to be called after a successful
     update. */
 volatile void (*tlc_onUpdateFinished)(void);
 
-/** Packed grayscale data, 24 bytes (16 * 12 bits) per TLC.
+/* for led matrices, counts the row being updated */
+#if NUM_ROWS != 1
+volatile uint8_t current_row = 0;
+#endif
+
+/** Packed grayscale data, 36 bytes (24 * 12 bits) per TLC.
 
     Format: Lets assume we have 2 TLCs, A and B, daisy-chained with the SOUT of
     A going into the SIN of B.
     - byte 0: upper 8 bits of B.15
     - byte 1: lower 4 bits of B.15 and upper 4 bits of B.14
-    - byte 2: lower 8 bits of B.0
+    - byte 2: lower 8 bits of B.14
     - ...
-    - byte 24: upper 8 bits of A.15
-    - byte 25: lower 4 bits of A.15 and upper 4 bits of A.14
+    - byte 36: upper 8 bits of A.15
+    - byte 37: lower 4 bits of A.15 and upper 4 bits of A.14
     - ...
-    - byte 47: lower 8 bits of A.0
+    - byte 71: lower 8 bits of A.0
 
     \note Normally packing data like this is bad practice.  But in this
           situation, shifting the data out is really fast because the format of
           the array is the same as the format of the TLC's serial interface. */
-uint8_t tlc_GSData[NUM_TLCS * 24];
+uint8_t tlc_GSData[36 * NUM_ROWS];
 
-/** Don't add an extra SCLK pulse after switching from dot-correction mode. */
-static uint8_t firstGSInput;
-
-/** Interrupt called after an XLAT pulse to prevent more XLAT pulses. */
-ISR(TIMER1_OVF_vect)
-{
-    disable_XLAT_pulses();
-    clear_XLAT_interrupt();
-    tlc_needXLAT = 0;
-    if (tlc_onUpdateFinished) {
-        sei();
-        tlc_onUpdateFinished();
-    }
+#if NUM_ROWS != 1
+ISR(TIMER2_COMPA_vect){
+   BLANK_PORT |= _BV(BLANK_PIN);
+   Tlc.setRow(current_row);
+   Tlc.update(current_row);
+   BLANK_PORT &= ~_BV(BLANK_PIN);
+   current_row++;
+   current_row %= NUM_ROWS;
 }
-
-/** \defgroup ReqVPRG_ENABLED Functions that Require VPRG_ENABLED
-    Functions that require VPRG_ENABLED == 1.
-    You can enable VPRG by changing
-    \code #define VPRG_ENABLED    0 \endcode to
-    \code #define VPRG_ENABLED    1 \endcode in tlc_config.h
-
-    You will also have to connect Arduino digital pin 6 to TLC pin 27. (The
-    pin to be used can be changed in tlc_config.h).  If VPRG is not enabled,
-    the TLC pin should grounded (remember to unconnect TLC pin 27 from GND
-    if you do enable VPRG). */
-/* @{ */ /* @} */
+#endif
 
 /** \defgroup CoreFunctions Core Libary Functions
     These function are all prefixed with "Tlc." */
@@ -94,63 +79,52 @@ void Tlc5947::init(uint16_t initialValue)
     /* Pin Setup */
     XLAT_DDR |= _BV(XLAT_PIN);
     BLANK_DDR |= _BV(BLANK_PIN);
-    GSCLK_DDR |= _BV(GSCLK_PIN);
-#if VPRG_ENABLED
-    VPRG_DDR |= _BV(VPRG_PIN);
-    VPRG_PORT &= ~_BV(VPRG_PIN);  // grayscale mode (VPRG low)
-#endif
-#if XERR_ENABLED
-    XERR_DDR &= ~_BV(XERR_PIN);   // XERR as input
-    XERR_PORT |= _BV(XERR_PIN);   // enable pull-up resistor
-#endif
     BLANK_PORT |= _BV(BLANK_PIN); // leave blank high (until the timers start)
-
-    tlc_shift8_init();
+#if NUM_ROWS != 1
+    A0_DDR |= _BV(A0_PIN);
+    A1_DDR |= _BV(A1_PIN);
+    A2_DDR |= _BV(A2_PIN);
+#endif
+    shift8_init();
 
     setAll(initialValue);
-    update();
-    disable_XLAT_pulses();
-    clear_XLAT_interrupt();
-    tlc_needXLAT = 0;
-    pulse_pin(XLAT_PORT, XLAT_PIN);
+    update(0);
 
+    /* Timer 1 setup for matrices */
+#if NUM_ROWS != 1
+    cli();//stop interrupts
 
-    /* Timer Setup */
+/*
+    //set timer1 interrupt at 350Hz
+    TCCR1A = 0;// set entire TCCR1A register to 0
+    TCCR1B = 0;// same for TCCR1B
+    TCNT1  = 0;//initialize counter value to 0
+    // set compare match register for 1hz increments
+    OCR1A = 32000; //45713;// = (16*10^6) / 350 - 1 (must be <65536)
+    // turn on CTC mode
+    TCCR1B |= (1 << WGM12);
+    // Set CS10 for no prescaler
+    TCCR1B |= (1 << CS10);  
+    // enable timer compare interrupt
+    TIMSK1 |= (1 << OCIE1A);
+*/
+    //set timer2 interrupt at 500Hz
+    TCCR2A = 0;// set entire TCCR1A register to 0
+    TCCR2B = 0;// same for TCCR1B
+    TCNT2  = 0;//initialize counter value to 0
+    // set compare match register
+    OCR2A = 30; //45713;// = (16*10^6) / 1024 / 500 - 1 (must be <256)
+    // turn on CTC mode
+    TCCR2A |= (1 << WGM21);
+    // Set CS20, CS21 and CS22 for 1024 prescaler
+    TCCR2B |= (1 << CS20);
+    TCCR2B |= (1 << CS21);  
+    TCCR2B |= (1 << CS22);
+    // enable timer compare interrupt
+    TIMSK2 |= (1 << OCIE2A);
 
-    /* Timer 1 - BLANK / XLAT */
-    TCCR1A = _BV(COM1B1);  // non inverting, output on OC1B, BLANK
-    TCCR1B = _BV(WGM13);   // Phase/freq correct PWM, ICR1 top
-    OCR1A = 1;             // duty factor on OC1A, XLAT is inside BLANK
-    OCR1B = 2;             // duty factor on BLANK (larger than OCR1A (XLAT))
-    ICR1 = TLC_PWM_PERIOD; // see tlc_config.h
-
-    /* Timer 2 - GSCLK */
-#if defined(TLC_ATMEGA_8_H)
-    TCCR2  = _BV(COM20)       // set on BOTTOM, clear on OCR2A (non-inverting),
-           | _BV(WGM21);      // output on OC2B, CTC mode with OCR2 top
-    OCR2   = TLC_GSCLK_PERIOD / 2; // see tlc_config.h
-    TCCR2 |= _BV(CS20);       // no prescale, (start pwm output)
-#elif defined(TLC_TIMER3_GSCLK)
-    TCCR3A = _BV(COM3A1)      // set on BOTTOM, clear on OCR3A (non-inverting),
-                              // output on OC3A
-           | _BV(WGM31);      // Fast pwm with ICR3 top
-    OCR3A = 0;                // duty factor (as short a pulse as possible)
-    ICR3 = TLC_GSCLK_PERIOD;  // see tlc_config.h
-    TCCR3B = _BV(CS30)        // no prescale, (start pwm output)
-           | _BV(WGM32)       // Fast pwm with ICR3 top
-           | _BV(WGM33);      // Fast pwm with ICR3 top
-#else
-    TCCR2A = _BV(COM2B1)      // set on BOTTOM, clear on OCR2A (non-inverting),
-                              // output on OC2B
-           | _BV(WGM21)       // Fast pwm with OCR2A top
-           | _BV(WGM20);      // Fast pwm with OCR2A top
-    TCCR2B = _BV(WGM22);      // Fast pwm with OCR2A top
-    OCR2B = 0;                // duty factor (as short a pulse as possible)
-    OCR2A = TLC_GSCLK_PERIOD; // see tlc_config.h
-    TCCR2B |= _BV(CS20);      // no prescale, (start pwm output)
+    sei();//allow interrupts
 #endif
-    TCCR1B |= _BV(CS10);      // no prescale, (start pwm output)
-    update();
 }
 
 /** Clears the grayscale data array, #tlc_GSData, but does not shift in any
@@ -170,39 +144,32 @@ void Tlc5947::clear(void)
     \code while(tlc_needXLAT); \endcode
     \returns 1 if there is data waiting to be latched, 0 if data was
              successfully shifted in */
-uint8_t Tlc5947::update(void)
+uint8_t Tlc5947::update(uint8_t row)
 {
-    if (tlc_needXLAT) {
-        return 1;
+    uint8_t *p = tlc_GSData + 36 * row;
+    while (p < tlc_GSData + 36 * (row + 1)) {
+        shift8(*p++);
+        shift8(*p++);
+        shift8(*p++);
     }
-    disable_XLAT_pulses();
-    if (firstGSInput) {
-        // adds an extra SCLK pulse unless we've just set dot-correction data
-        firstGSInput = 0;
-    } else {
-        pulse_pin(SCLK_PORT, SCLK_PIN);
-    }
-    uint8_t *p = tlc_GSData;
-    while (p < tlc_GSData + NUM_TLCS * 24) {
-        tlc_shift8(*p++);
-        tlc_shift8(*p++);
-        tlc_shift8(*p++);
-    }
-    tlc_needXLAT = 1;
-    enable_XLAT_pulses();
-    set_XLAT_interrupt();
+    
+
+    //BLANK_PORT |= _BV(BLANK_PIN);
+    pulse_pin(XLAT_PORT, XLAT_PIN);
+    //pulse_pin(BLANK_PORT, BLANK_PIN);
+    //BLANK_PORT &= ~_BV(BLANK_PIN);
     return 0;
 }
 
 /** Sets channel to value in the grayscale data array, #tlc_GSData.
-    \param channel (0 to #NUM_TLCS * 16 - 1).  OUT0 of the first TLC is
-           channel 0, OUT0 of the next TLC is channel 16, etc.
+    \param channel (0 to 23).  OUT0 of the first TLC is
+           channel 0, OUT0 of the next TLC is channel 24, etc.
     \param value (0-4095).  The grayscale value, 4095 is maximum.
     \see get */
-void Tlc5947::set(TLC_CHANNEL_TYPE channel, uint16_t value)
+void Tlc5947::set(TLC_CHANNEL_TYPE channel, uint8_t row, uint16_t value)
 {
-    TLC_CHANNEL_TYPE index8 = (NUM_TLCS * 16 - 1) - channel;
-    uint8_t *index12p = tlc_GSData + ((((uint16_t)index8) * 3) >> 1);
+    TLC_CHANNEL_TYPE index8 = 23 - channel;
+    uint8_t *index12p = tlc_GSData + 36 * row + ((((uint16_t)index8) * 3) >> 1);
     if (index8 & 1) { // starts in the middle
                       // first 4 bits intact | 4 top bits of value
         *index12p = (*index12p & 0xF0) | (value >> 8);
@@ -216,21 +183,16 @@ void Tlc5947::set(TLC_CHANNEL_TYPE channel, uint16_t value)
     }
 }
 
-void Tlc5947::setLED(uint8_t lednum, uint16_t r, uint16_t g, uint16_t b) {
-  set(lednum, r);
-  set(23 - lednum, g);
-  set(lednum + 8, b);
-}
 
 /** Gets the current grayscale value for a channel
-    \param channel (0 to #NUM_TLCS * 16 - 1).  OUT0 of the first TLC is
-           channel 0, OUT0 of the next TLC is channel 16, etc.
+    \param channel (0 to 23).  OUT0 of the first TLC is
+           channel 0, OUT0 of the next TLC is channel 24, etc.
     \returns current grayscale value (0 - 4095) for channel
     \see set */
-uint16_t Tlc5947::get(TLC_CHANNEL_TYPE channel)
+uint16_t Tlc5947::get(TLC_CHANNEL_TYPE channel, uint8_t row)
 {
-    TLC_CHANNEL_TYPE index8 = (NUM_TLCS * 16 - 1) - channel;
-    uint8_t *index12p = tlc_GSData + ((((uint16_t)index8) * 3) >> 1);
+    TLC_CHANNEL_TYPE index8 = 23 - channel;
+    uint8_t *index12p = tlc_GSData + 36 * row + ((((uint16_t)index8) * 3) >> 1);
     return (index8 & 1)? // starts in the middle
             (((uint16_t)(*index12p & 15)) << 8) | // upper 4 bits
             *(index12p + 1)                       // lower 8 bits
@@ -244,71 +206,25 @@ uint16_t Tlc5947::get(TLC_CHANNEL_TYPE channel)
     \param value grayscale value (0 - 4095) */
 void Tlc5947::setAll(uint16_t value)
 {
+    uint8_t row;
     uint8_t firstByte = value >> 4;
     uint8_t secondByte = (value << 4) | (value >> 8);
     uint8_t *p = tlc_GSData;
-    while (p < tlc_GSData + NUM_TLCS * 24) {
-        *p++ = firstByte;
-        *p++ = secondByte;
-        *p++ = (uint8_t)value;
+    for(row = 0; row < NUM_ROWS; row++)
+    {
+        p = tlc_GSData + 36 * row;
+        while (p < tlc_GSData + 36 * (row + 1)) {
+            *p++ = firstByte;
+            *p++ = secondByte;
+            *p++ = (uint8_t)value;
+        }
     }
 }
-
-#if VPRG_ENABLED
-
-/** \addtogroup ReqVPRG_ENABLED
-    From the \ref CoreFunctions "Core Functions":
-    - \link Tlc5947::setAllDC Tlc.setAllDC(uint8_t value(0-63)) \endlink - sets
-      all the dot correction data to value */
-/* @{ */
-
-/** Sets the dot correction for all channels to value.  The dot correction
-    value correspondes to maximum output current by
-    \f$\displaystyle I_{OUT_n} = I_{max} \times \frac{DCn}{63} \f$
-    where
-    - \f$\displaystyle I_{max} = \frac{1.24V}{R_{IREF}} \times 31.5 =
-         \frac{39.06}{R_{IREF}} \f$
-    - DCn is the dot correction value for channel n
-    \param value (0-63) */
-void Tlc5947::setAllDC(uint8_t value)
-{
-    tlc_dcModeStart();
-
-    uint8_t firstByte = value << 2 | value >> 4;
-    uint8_t secondByte = value << 4 | value >> 2;
-    uint8_t thirdByte = value << 6 | value;
-
-    for (TLC_CHANNEL_TYPE i = 0; i < NUM_TLCS * 12; i += 3) {
-        tlc_shift8(firstByte);
-        tlc_shift8(secondByte);
-        tlc_shift8(thirdByte);
-    }
-    pulse_pin(XLAT_PORT, XLAT_PIN);
-
-    tlc_dcModeStop();
-}
-
-/* @} */
-
-#endif
-
-#if XERR_ENABLED
-
-/** Checks for shorted/broken LEDs reported by any of the TLCs.
-    \returns 1 if a TLC is reporting an error, 0 otherwise. */
-uint8_t Tlc5947::readXERR(void)
-{
-    return ((XERR_PINS & _BV(XERR_PIN)) == 0);
-}
-
-#endif
-
-/* @} */
 
 #if DATA_TRANSFER_MODE == TLC_BITBANG
 
 /** Sets all the bit-bang pins to output */
-void tlc_shift8_init(void)
+void Tlc5947::shift8_init(void)
 {
     SIN_DDR |= _BV(SIN_PIN);   // SIN as output
     SCLK_DDR |= _BV(SCLK_PIN); // SCLK as output
@@ -316,7 +232,7 @@ void tlc_shift8_init(void)
 }
 
 /** Shifts a byte out, MSB first */
-void tlc_shift8(uint8_t byte)
+void Tlc5947::shift8(uint8_t byte)
 {
     for (uint8_t bit = 0x80; bit; bit >>= 1) {
         if (bit & byte) {
@@ -331,7 +247,7 @@ void tlc_shift8(uint8_t byte)
 #elif DATA_TRANSFER_MODE == TLC_SPI
 
 /** Initializes the SPI module to double speed (f_osc / 2) */
-void tlc_shift8_init(void)
+void Tlc5947::shift8_init(void)
 {
     SIN_DDR    |= _BV(SIN_PIN);    // SPI MOSI as output
     SCLK_DDR   |= _BV(SCLK_PIN);   // SPI SCK as output
@@ -345,7 +261,7 @@ void tlc_shift8_init(void)
 }
 
 /** Shifts out a byte, MSB first */
-void tlc_shift8(uint8_t byte)
+void Tlc5947::shift8(uint8_t byte)
 {
     SPDR = byte; // starts transmission
     while (!(SPSR & _BV(SPIF)))
@@ -354,24 +270,83 @@ void tlc_shift8(uint8_t byte)
 
 #endif
 
-#if VPRG_ENABLED
-
-/** Switches to dot correction mode and clears any waiting grayscale latches.*/
-void tlc_dcModeStart(void)
+#if NUM_ROWS != 1
+void Tlc5947::setRow(uint8_t row)
 {
-    disable_XLAT_pulses(); // ensure that no latches happen
-    clear_XLAT_interrupt(); // (in case this was called right after update)
-    tlc_needXLAT = 0;
-    VPRG_PORT |= _BV(VPRG_PIN); // dot correction mode
+  switch (row)
+  {
+    case 0:
+      PORTD = (PORTD & ROW_MASK) | (3 << A0_PIN);
+      break;
+    case 1:
+      PORTD = (PORTD & ROW_MASK) | (6 << A0_PIN);
+      break;
+    case 2:
+      PORTD = (PORTD & ROW_MASK) | (5 << A0_PIN);
+      break;
+    case 3:
+      PORTD = (PORTD & ROW_MASK) | (4 << A0_PIN);
+      break;
+    case 4:
+      PORTD = (PORTD & ROW_MASK) | (7 << A0_PIN);
+      break;
+    case 5:
+      PORTD = (PORTD & ROW_MASK) | (0 << A0_PIN);
+      break;
+    case 6:
+      PORTD = (PORTD & ROW_MASK) | (1 << A0_PIN);
+      break;
+    case 7:
+      PORTD = (PORTD & ROW_MASK) | (2 << A0_PIN);
+      break;
+  }
 }
 
-/** Switches back to grayscale mode. */
-void tlc_dcModeStop(void)
+void Tlc5947::shiftLeft()
 {
-    VPRG_PORT &= ~_BV(VPRG_PIN); // back to grayscale mode
-    firstGSInput = 1;
+    uint8_t i, row;
+    uint8_t temp_row[36];
+    for (i = 0; i < 36; i++)
+        temp_row[i] = tlc_GSData[i];
+    for (row = 1; row < NUM_ROWS; row++)
+        for (i = 0; i < 36; i++)
+            tlc_GSData[(row - 1) * 36 + i] = tlc_GSData[row * 36 + i];
+    for (i = 0; i < 36; i++)
+        tlc_GSData[(NUM_ROWS - 1) * 36 + i] = temp_row[i];
+
 }
 
+void Tlc5947::shiftRight()
+{
+    uint8_t i, row;
+    uint8_t temp_row[36];
+    for (i = 0; i < 36; i++)
+        temp_row[i] = tlc_GSData[(NUM_ROWS - 1) * 36 + i];
+    for (row = NUM_ROWS - 1; row > 0; row--)
+        for (i = 0; i < 36; i++)
+            tlc_GSData[row * 36 + i] = tlc_GSData[(row - 1) * 36 + i];
+    for (i = 0; i < 36; i++)
+        tlc_GSData[i] = temp_row[i];
+
+}
+
+void Tlc5947::setLED(uint8_t lednum, uint8_t row, uint16_t r, uint16_t g, uint16_t b) {
+    set(lednum, row, r);
+    set(23 - lednum, row, g);
+    set(lednum + 8, row, b);
+}
+
+void Tlc5947::setAllLED(uint16_t r, uint16_t g, uint16_t b) {
+    for(uint8_t row = 0; row < NUM_ROWS; row++)
+    {
+        for(uint8_t lednum = 0; lednum < 8; lednum++)
+        {
+            set(lednum, row, r);
+            set(23 - lednum, row, g);
+            set(lednum + 8, row, b);
+        }
+    }
+}
 #endif
 
 /** Preinstantiated Tlc variable. */
